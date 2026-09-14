@@ -1,8 +1,26 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  IaC Lab (v1) - Creates a VPC and an S3 bucket.
+  IaC Lab (v2) - Adds a public subnet + EC2 instance to the existing VPC/S3 stack.
+  VPC and S3 bucket resources are unchanged from v1.
+
+Parameters:
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+    Description: EC2 instance type (t2.micro/t3.micro are Free Tier eligible)
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: Always resolves to the latest Amazon Linux 2 AMI for the region
 
 Resources:
+
+  # ---- Unchanged from v1 ----
 
   LabVPC:
     Type: AWS::EC2::VPC
@@ -22,10 +40,86 @@ Resources:
         - Key: Name
           Value: iac-lab-bucket
 
+  # ---- New in v2: networking needed to place an EC2 instance in the VPC ----
+
+  LabInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: iac-lab-igw
+
+  LabVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LabVPC
+      InternetGatewayId: !Ref LabInternetGateway
+
+  LabPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LabVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: iac-lab-public-subnet
+
+  LabPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LabVPC
+      Tags:
+        - Key: Name
+          Value: iac-lab-public-rt
+
+  LabPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: LabVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref LabPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref LabInternetGateway
+
+  LabSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LabPublicSubnet
+      RouteTableId: !Ref LabPublicRouteTable
+
+  # ---- New in v2: the EC2 instance itself ----
+
+  LabEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH access to the lab EC2 instance
+      VpcId: !Ref LabVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0   # Lab only - restrict to your IP in real use
+      Tags:
+        - Key: Name
+          Value: iac-lab-ec2-sg
+
+  LabEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref LabPublicSubnet
+      SecurityGroupIds:
+        - !Ref LabEC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: iac-lab-ec2
+
 Outputs:
 
   VpcId:
-    Description: ID of the created VPC
+    Description: ID of the VPC
     Value: !Ref LabVPC
 
   VpcCidr:
@@ -33,5 +127,17 @@ Outputs:
     Value: !GetAtt LabVPC.CidrBlock
 
   S3BucketName:
-    Description: Name of the created S3 bucket
+    Description: Name of the S3 bucket
     Value: !Ref LabS3Bucket
+
+  SubnetId:
+    Description: ID of the public subnet
+    Value: !Ref LabPublicSubnet
+
+  EC2InstanceId:
+    Description: ID of the EC2 instance
+    Value: !Ref LabEC2Instance
+
+  EC2PublicIP:
+    Description: Public IP of the EC2 instance
+    Value: !GetAtt LabEC2Instance.PublicIp
